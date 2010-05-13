@@ -6,6 +6,7 @@ from django.contrib import auth
 from django.utils.translation import ugettext as _, ungettext, ugettext_lazy
 
 from paypal.standard import ipn
+from paypal.standard.ipn.models import PayPalIPN
 
 import signals, utils
 
@@ -15,7 +16,7 @@ class Transaction(models.Model):
                                      null=True, blank=True, editable=False)
     user = models.ForeignKey(auth.models.User,
                              null=True, blank=True, editable=False)
-    ipn = models.ForeignKey(ipn.models.PayPalIPN,
+    ipn = models.ForeignKey(PayPalIPN,
                             null=True, blank=True, editable=False)
     event = models.CharField(max_length=100, editable=False)
     amount = models.DecimalField(max_digits=64, decimal_places=2,
@@ -233,6 +234,7 @@ class UserSubscription(models.Model):
             rv += u' (expired)'
         return rv
 
+#This should work once per day with a cronjob
 def unsubscribe_expired():
     """Unsubscribes all users whose subscription has expired.
 
@@ -292,13 +294,39 @@ def handle_payment_was_successful(sender, **kwargs):
                                    usersubscription=us, event='incorrect payment')
         else:
             if sender.mc_gross == s.price:
-                us.extend()
-                us.save()
-                Transaction(user=u, subscription=s, ipn=sender,
-                            event='subscription payment', amount=sender.mc_gross
-                            ).save()
-                signals.paid.send(s, ipn=sender, subscription=s, user=u,
-                                  usersubscription=us)
+                if sender.payment_status == 'Pending':
+                    Transaction(user=u, subscription=s, ipn=sender,
+                                event='payment pending', amount=sender.mc_gross
+                                ).save()
+                    # Save the new inactive, not extended subscription!
+                    # The "extend action" will take effect when the money will be approved!
+                    us.save()
+                    signals.event.send(s, ipn=sender, subscription=s, user=u, event='pending')
+                elif sender.payment_status == 'Completed':
+                    us.extend()
+                    us.save()
+                    Transaction(user=u, subscription=s, ipn=sender,
+                                event='subscription payment', amount=sender.mc_gross
+                                ).save()
+                    signals.paid.send(s, ipn=sender, subscription=s, user=u,
+                                      usersubscription=us)
+                else:
+                    # TODO: Handle the other payment status types appropriately
+#                     (sender.payment_status == 'Active' or 
+#                      sender.payment_status == 'Cancelled' or
+#                      sender.payment_status == 'Cleared' or
+#                      sender.payment_status == 'Denied' or
+#                      sender.payment_status == 'Paid' or
+#                      sender.payment_status == 'Processed' or
+#                      sender.payment_status == 'Refused' or
+#                      sender.payment_status == 'Reversed' or
+#                      sender.payment_status == 'Rewarded' or
+#                      sender.payment_status == 'Unclaimed' or
+#                      sender.payment_status == 'Uncleared'):
+                    Transaction(user=u, subscription=s, ipn=sender,
+                                event='payment strange status', amount=sender.mc_gross
+                                ).save()
+                    signals.event.send(s, ipn=sender, subscription=s, user=u, event='strange_status')
             else:
                 Transaction(user=u, subscription=s, ipn=sender,
                             event='incorrect payment', amount=sender.mc_gross
